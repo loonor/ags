@@ -36,16 +36,20 @@ export interface Config<W extends Gtk.Window = Gtk.Window> {
     windows?: W[]
     style?: string
     icons?: string
+    gtkTheme?: string
+    iconTheme?: string
+    cursorTheme?: string
+
     onWindowToggled?: (windowName: string, visible: boolean) => void
     onConfigParsed?: (app: App) => void
-    closeWindowDelay: { [key: string]: number }
+    closeWindowDelay?: { [key: string]: number }
 
     // FIXME: deprecated
-    notificationPopupTimeout: number
-    notificationForceTimeout: boolean
-    cacheNotificationActions: boolean
-    cacheCoverArt: boolean
-    maxStreamVolume: number
+    notificationPopupTimeout?: number
+    notificationForceTimeout?: boolean
+    cacheNotificationActions?: boolean
+    cacheCoverArt?: boolean
+    maxStreamVolume?: number
 }
 
 export class App extends Gtk.Application {
@@ -57,18 +61,30 @@ export class App extends Gtk.Application {
     }
 
     private _dbus!: Gio.DBusExportedObject;
-    private _closeDelay!: Config['closeWindowDelay'];
     private _cssProviders: Gtk.CssProvider[] = [];
     private _objectPath!: string;
     private _windows: Map<string, Gtk.Window> = new Map();
     private _configPath!: string;
     private _configDir!: string;
 
+    private _closeWindowDelay!: Config['closeWindowDelay'];
+    get closeWindowDelay() { return this._closeWindowDelay || {}; }
+    set closeWindowDelay(v) { this._closeWindowDelay = v; }
+
     get windows() { return [...this._windows.values()]; }
     get configPath() { return this._configPath; }
     get configDir() { return this._configDir; }
 
-    resetCss() {
+    set iconTheme(name: string) { Gtk.Settings.get_default()!.gtk_icon_theme_name = name; }
+    get iconTheme() { return Gtk.Settings.get_default()!.gtk_icon_theme_name || ''; }
+
+    set cursorTheme(name: string) { Gtk.Settings.get_default()!.gtk_cursor_theme_name = name; }
+    get cursorTheme() { return Gtk.Settings.get_default()!.gtk_cursor_theme_name || ''; }
+
+    set gtkTheme(name: string) { Gtk.Settings.get_default()!.gtk_theme_name = name; }
+    get gtkTheme() { return Gtk.Settings.get_default()!.gtk_theme_name || ''; }
+
+    readonly resetCss = () => {
         const screen = Gdk.Screen.get_default();
         if (!screen) {
             console.error("couldn't get screen");
@@ -80,9 +96,9 @@ export class App extends Gtk.Application {
         });
 
         this._cssProviders = [];
-    }
+    };
 
-    applyCss(path: string) {
+    readonly applyCss = (path: string) => {
         const screen = Gdk.Screen.get_default();
         if (!screen) {
             console.error("couldn't get screen");
@@ -109,7 +125,11 @@ export class App extends Gtk.Application {
         );
 
         this._cssProviders.push(cssProvider);
-    }
+    };
+
+    readonly addIcons = (path: string) => {
+        Gtk.IconTheme.get_default().prepend_search_path(path);
+    };
 
     setup(bus: string, path: string, configDir: string, entry: string) {
         this.application_id = bus;
@@ -135,28 +155,28 @@ export class App extends Gtk.Application {
         this._load();
     }
 
-    connect(signal = 'window-toggled', callback: (_: this, ...args: any[]) => void): number {
+    readonly connect = (signal = 'window-toggled', callback: (_: this, ...args: any[]) => void) => {
         return super.connect(signal, callback);
-    }
+    };
 
-    toggleWindow(name: string) {
+    readonly toggleWindow = (name: string) => {
         const w = this.getWindow(name);
         if (w)
             w.visible ? this.closeWindow(name) : this.openWindow(name);
         else
             return 'There is no window named ' + name;
-    }
+    };
 
-    openWindow(name: string) {
+    readonly openWindow = (name: string) => {
         this.getWindow(name)?.show();
-    }
+    };
 
-    closeWindow(name: string) {
+    readonly closeWindow = (name: string) => {
         const w = this.getWindow(name);
         if (!w || !w.visible)
             return;
 
-        const delay = this._closeDelay[name];
+        const delay = this.closeWindowDelay[name];
         if (delay && w.visible) {
             timeout(delay, () => w.hide());
             this.emit('window-toggled', name, false);
@@ -164,17 +184,17 @@ export class App extends Gtk.Application {
         else {
             w.hide();
         }
-    }
+    };
 
-    getWindow(name: string) {
+    readonly getWindow = (name: string) => {
         const w = this._windows.get(name);
         if (!w)
             console.error(Error(`There is no window named ${name}`));
 
         return w;
-    }
+    };
 
-    removeWindow(w: Gtk.Window | string) {
+    readonly removeWindow = (w: Gtk.Window | string) => {
         const name = typeof w === 'string' ? w : w.name || 'gtk-layer-shell';
 
         const win = this._windows.get(name);
@@ -185,9 +205,9 @@ export class App extends Gtk.Application {
 
         win.destroy();
         this._windows.delete(name);
-    }
+    };
 
-    addWindow(w: Gtk.Window) {
+    readonly addWindow = (w: Gtk.Window) => {
         if (!(w instanceof Gtk.Window)) {
             return console.error(Error(`${w} is not an instanceof Gtk.Window, ` +
                 ` but it is of type ${typeof w}`));
@@ -206,39 +226,62 @@ export class App extends Gtk.Application {
         }
 
         this._windows.set(w.name, w);
-    }
+    };
+
+    readonly quit = () => super.quit();
 
     private async _load() {
         try {
             const entry = await import(`file://${this.configPath}`);
             const config = entry.default as Config;
             if (!config) {
-                console.error('Missing default export');
+                console.warn('Missing default export');
                 return this.emit('config-parsed');
             }
 
             // FIXME:
             deprecated(config);
 
-            this._closeDelay = config?.closeWindowDelay || {};
+            const {
+                windows,
+                closeWindowDelay,
+                style,
+                icons,
+                gtkTheme,
+                iconTheme,
+                cursorTheme,
+                onConfigParsed,
+                onWindowToggled,
+            } = config;
 
-            if (config.style) {
-                this.applyCss(config.style.startsWith('.')
-                    ? `${this.configDir}${config.style.slice(1)}`
-                    : config.style);
+            this.closeWindowDelay = closeWindowDelay || {};
+
+            if (gtkTheme)
+                this.gtkTheme = gtkTheme;
+
+            if (iconTheme)
+                this.iconTheme = iconTheme;
+
+            if (cursorTheme)
+                this.cursorTheme = cursorTheme;
+
+            if (style) {
+                this.applyCss(style.startsWith('.')
+                    ? `${this.configDir}${style.slice(1)}`
+                    : style);
             }
 
-            if (config.icons) {
-                Gtk.IconTheme.get_default().append_search_path(
-                    config.icons.startsWith('.')
-                        ? `${this.configDir}${config.icons.slice(1)}`
-                        : config.icons);
+            if (icons) {
+                this.addIcons(icons.startsWith('.')
+                    ? `${this.configDir}${icons.slice(1)}`
+                    : icons);
             }
-            if (typeof config.onWindowToggled === 'function')
-                this.connect('window-toggled', (_, n, v) => config.onWindowToggled!(n, v));
 
-            config.windows?.forEach(this.addWindow.bind(this));
-            config.onConfigParsed?.(this);
+            if (typeof onWindowToggled === 'function')
+                this.connect('window-toggled', (_, n, v) => onWindowToggled!(n, v));
+
+            windows?.forEach(this.addWindow.bind(this));
+            onConfigParsed?.(this);
 
             this.emit('config-parsed');
         } catch (err) {
